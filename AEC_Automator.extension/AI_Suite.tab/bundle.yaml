@@ -1,6 +1,8 @@
 layout:
   - Resources
   - Placeholder Panel
+  - Smart_Tools
+  - Dev
 
 # P.S.   bundle.yaml file is used for ordering and hiding buttons and bundles.
 # P.S.S. The order will be applied correctly after restarting Revit
