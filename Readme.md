@@ -7,6 +7,7 @@ Designed for Design Technologists and BIM Coordinators, this suite accelerates d
 ---
 
 ## 🛠️ The Toolkit
+<img width="566" height="131" alt="Screenshot 2026-07-22 195910" src="https://github.com/user-attachments/assets/ab07a4d9-7166-4fb8-a6ff-399f2ec6c158" />
 
 The suite consists of four specialized tools, structured for maximum predictability and model safety. **Click on any tool below to view its source code:**
 
