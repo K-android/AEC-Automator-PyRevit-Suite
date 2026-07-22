@@ -63,7 +63,7 @@ def run_script():
     # ==========================================================================
     # PASTE YOUR GEMINI API KEY HERE
     # ==========================================================================
-    GEMINI_API_KEY = "AIzaSyAUcLwGerdXf51UT4H7GXZkcR5IlA-MeO0"
+    GEMINI_API_KEY = "PUT GEMINI KEY"
 
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY
     
