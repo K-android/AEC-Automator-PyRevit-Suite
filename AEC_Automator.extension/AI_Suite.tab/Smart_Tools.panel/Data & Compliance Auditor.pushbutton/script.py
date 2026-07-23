@@ -18,8 +18,7 @@ from System.Net import ServicePointManager, SecurityProtocolType, WebClient, Htt
 from System.Text import Encoding
 
 def normalize_text(text):
-    if not text:
-        return ""
+    if not text: return ""
     return re.sub(r'[^a-zA-Z0-9\s]', ' ', str(text)).lower()
 
 def safe_str(val):
@@ -27,22 +26,10 @@ def safe_str(val):
     try: return unicode(val).encode('utf-8')
     except NameError: return str(val)
 
-def matches_level(req_level, elem_level_name):
-    if not req_level: return True
-    if not elem_level_name: return False
-    req_clean = req_level.lower().strip()
-    elem_clean = elem_level_name.lower().strip()
-    if req_clean in elem_clean or elem_clean in req_clean: return True
-    req_digits = re.findall(r'\d+', req_clean)
-    elem_digits = re.findall(r'\d+', elem_clean)
-    if req_digits and elem_digits:
-        return any(str(int(d)) in [str(int(e)) for e in elem_digits] for d in req_digits)
-    return False
-
 def reset_view_overrides(doc, active_view):
     collector = DB.FilteredElementCollector(doc, active_view.Id).WhereElementIsNotElementType()
     empty_ogs = DB.OverrideGraphicSettings()
-    with DB.Transaction(doc, "Clear AI Overrides") as t:
+    with DB.Transaction(doc, "Clear QA Overrides") as t:
         t.Start()
         for elem in collector: active_view.SetElementOverrides(elem.Id, empty_ogs)
         t.Commit()
@@ -55,23 +42,24 @@ def run_script():
 
     # 1. Prompt User
     instructions = (
-        "🤖 BIM AI Finder & Auditor (Targeted & Unit-Aware)\n\n"
+        "🚨 AI Data & Compliance Auditor (Self-Diagnosing)\n\n"
         "How to use:\n"
-        "• Search by specific names (e.g., 'Find the Tree Guard railing').\n"
-        "• Search by parameters & units (e.g., 'Find doors with Height > 7ft').\n"
-        "• Type 'reset' to clear all gold highlights.\n\n"
-        "Enter your query:"
+        "• Missing Data: 'Find all Tree Guard railings missing a Mark'\n"
+        "• Code Thresholds: 'Show walls with thickness less than 150mm'\n"
+        "• Quality Control: 'Find rooms missing a name'\n"
+        "• Type 'reset' to clear all red error highlights.\n\n"
+        "Enter your QA/QC rule:"
     )
     user_prompt = forms.ask_for_string(
         prompt=instructions,
-        title="BIM AI Finder & Auditor",
-        default="Find the Tree Guard railing at Level 5"
+        title="BIM AI Data & Compliance Auditor",
+        default="Find all doors missing a Fire Rating"
     )
     if not user_prompt: return
     
     if user_prompt.lower().strip() == "reset":
         reset_view_overrides(doc, active_view)
-        UI.TaskDialog.Show("Reset Complete", "All AI highlights have been cleared.")
+        UI.TaskDialog.Show("Reset Complete", "All AI error highlights have been cleared.")
         return
 
     # 2. Configure .NET Networking & Secure API
@@ -86,17 +74,17 @@ def run_script():
 
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY
     
-    # UPGRADED SYSTEM INSTRUCTIONS
     system_instruction_text = (
-        "You are an expert BIM Data Architect. Convert natural language requests into a structured JSON query object.\n"
+        "You are a Revit QA/QC Auditor. Convert natural language rules into a JSON audit object.\n"
         "Output ONLY raw JSON matching this key structure exactly:\n"
-        '{"category": string, "keywords": list of strings, "parameter": string or null, "operator": string or null, "value": number or null, "unit": string or null, "level": string or null, "phase": string or null, "workset": string or null, "design_option": string or null}\n\n'
+        '{"category": string, "keywords": list of strings, "target_parameter": string, "audit_type": string, "operator": string or null, "value": number or null, "unit": string or null}\n\n'
         "Domain Rules:\n"
         "1. CATEGORY: Rooms, Walls, Doors, Windows, Columns, Floors, Ceilings, Roofs, Furniture, Casework, Railings, Stairs, Ramps, Specialty Equipment, Generic Models, Site, Planting, Curtain Panels, Curtain Mullions, Structural Columns, Structural Framing, Structural Foundations, Plumbing, Lighting, Mechanical Equipment, Electrical Equipment, Electrical Fixtures, Ducts, Pipes, Spaces, Areas.\n"
-        "2. KEYWORDS: CRITICAL - Extract identifying names, family types, descriptors, or marks (e.g., 'Tree Guard', 'Exterior'). DO NOT leave blank if the user names a specific object type.\n"
-        "3. PARAMETERS: Area, Volume, Width, Height, Thickness, Length, Mark, Fire Rating, Cost, or any custom parameter mentioned.\n"
-        "4. UNIT: If the user provides a unit (e.g., 'mm', 'cm', 'm', 'ft', 'in'), extract it here. Default to 'mm' for dimensions.\n"
-        "5. WORKSET/PHASE/DESIGN OPTION: Extract context filters."
+        "2. KEYWORDS: Extract identifying names, family types, or descriptors (e.g., 'Tree Guard', 'Exterior').\n"
+        "3. TARGET_PARAMETER: The parameter being audited (e.g. 'Fire Rating', 'Comments', 'Height').\n"
+        "4. AUDIT_TYPE: Must be 'missing_data' (if checking for null/empty) or 'threshold' (if checking numerical limits).\n"
+        "5. OPERATOR: '<', '>', '==', or null. (Only used if audit_type is 'threshold').\n"
+        "6. UNIT: If the user provides a unit (e.g., 'mm', 'cm', 'm', 'ft', 'in'), extract it here. Default to 'mm' for dimensions."
     )
 
     payload = {
@@ -117,22 +105,21 @@ def run_script():
         UI.TaskDialog.Show("API Error", "Connection failed: " + str(e))
         return
 
-    # Extract Action Data
     cat_str = parsed_data.get("category", "Doors")
     keywords = parsed_data.get("keywords") or []
-    param_str = parsed_data.get("parameter")
+    target_param_name = parsed_data.get("target_parameter")
+    audit_type = parsed_data.get("audit_type", "missing_data")
     op = parsed_data.get("operator")
     raw_val = parsed_data.get("value")
     target_val = float(raw_val) if raw_val is not None else 0.0
-    unit_str = parsed_data.get("unit") # NEW UNIT DATA
-    level_str = parsed_data.get("level")
-    phase_str = parsed_data.get("phase")
-    workset_str = parsed_data.get("workset")
-    do_str = parsed_data.get("design_option")
-    
+    unit_str = parsed_data.get("unit")
     target_unit = unit_str.lower() if unit_str else "mm"
 
-    # 4. Search Revit Document
+    if not target_param_name:
+        UI.TaskDialog.Show("AI Error", "The AI couldn't figure out which parameter you want to audit.")
+        return
+
+    # 4. Search Revit Document - MASSIVE CATEGORY EXPANSION
     cat_map = {
         "Rooms": DB.BuiltInCategory.OST_Rooms, "Room": DB.BuiltInCategory.OST_Rooms,
         "Walls": DB.BuiltInCategory.OST_Walls, "Wall": DB.BuiltInCategory.OST_Walls,
@@ -165,52 +152,16 @@ def run_script():
         return
 
     collector = DB.FilteredElementCollector(doc).OfCategory(selected_cat).WhereElementIsNotElementType()
-    matched_elements = []
-    total_val_sum = 0.0
-    diagnosed_param_name = param_str 
+    failed_elements = []
+    diagnosed_param_name = target_param_name
 
     for elem in collector:
         elem_type = None
         try: elem_type = doc.GetElement(elem.GetTypeId())
         except: pass
 
-        # Level Scanner
-        elem_level_name = "N/A"
-        try:
-            if hasattr(elem, "Level") and elem.Level: 
-                elem_level_name = elem.Level.Name
-            else:
-                lvl_param = elem.get_Parameter(DB.BuiltInParameter.INSTANCE_REFERENCE_LEVEL_PARAM) or elem.get_Parameter(DB.BuiltInParameter.SCHEDULE_LEVEL_PARAM) or elem.get_Parameter(DB.BuiltInParameter.ROOM_LEVEL_ID)
-                if not lvl_param:
-                    for p in elem.Parameters:
-                        if "level" in p.Definition.Name.lower() and p.StorageType == DB.StorageType.ElementId:
-                            lvl_param = p; break
-                if lvl_param and lvl_param.HasValue:
-                    lvl_elem = doc.GetElement(lvl_param.AsElementId())
-                    if lvl_elem: elem_level_name = lvl_elem.Name
-        except: pass
-        if level_str and not matches_level(level_str, elem_level_name): continue
-
-        # Context Filters
-        elem_phase_name = "N/A"
-        phase_param = elem.get_Parameter(DB.BuiltInParameter.PHASE_CREATED)
-        if phase_param and phase_param.AsElementId() != DB.ElementId.InvalidElementId:
-            phase_elem = doc.GetElement(phase_param.AsElementId())
-            if phase_elem: elem_phase_name = phase_elem.Name
-        if phase_str and phase_str.lower().strip() not in elem_phase_name.lower().strip(): continue
-
-        elem_ws_name = "N/A"
-        if doc.IsWorkshared and elem.WorksetId != DB.WorksetId.InvalidWorksetId:
-            ws = doc.GetWorksetTable().GetWorkset(elem.WorksetId)
-            if ws: elem_ws_name = ws.Name
-        if workset_str and workset_str.lower().strip() not in elem_ws_name.lower().strip(): continue
-
-        elem_do_name = "Main Model"
-        if elem.DesignOption: elem_do_name = elem.DesignOption.Name
-        if do_str and do_str.lower().strip() not in elem_do_name.lower().strip(): continue
-
-        # --- STRICTER KEYWORD FILTERING ---
-        elem_name, family_name = "Unknown", ""
+        elem_name = "Unknown"
+        family_name = ""
         try:
             if elem_type:
                 elem_name = elem_type.get_Parameter(DB.BuiltInParameter.SYMBOL_NAME_PARAM).AsString() or elem.Name
@@ -218,8 +169,9 @@ def run_script():
             else: elem_name = elem.Name
         except: pass
 
+        # Keyword Isolation Filtering
         if keywords:
-            stop_words = set(["find", "all", "show", "me", "get", "the", "door", "doors", "wall", "walls", "window", "windows", "railing", "railings"])
+            stop_words = set(["find", "all", "show", "me", "get", "the", "door", "doors", "wall", "walls", "window", "windows", "railing", "railings", "missing", "less", "than", "greater", "with"])
             filtered_words = []
             for kw in keywords:
                 for w in normalize_text(kw).split():
@@ -235,167 +187,160 @@ def run_script():
                         if p.StorageType == DB.StorageType.String and p.HasValue: target_str += " " + normalize_text(p.AsString())
             except: pass
             
-            # Require all keywords to match to prevent bulk selections
             if filtered_words and not all(word in target_str for word in filtered_words): 
                 continue
 
-        # --- PARAMETER EVALUATION WITH DYNAMIC MATH ---
-        param_val_display = "N/A"
-        if param_str:
-            target_clean = param_str.lower().strip()
-            param_to_eval = None
-            
-            for p in elem.Parameters:
+        # --- THE SELF-DIAGNOSING PARAMETER ENGINE ---
+        param = None
+        target_clean = target_param_name.lower().strip()
+        
+        for p in elem.Parameters:
+            if p.Definition.Name.lower() == target_clean:
+                param = p; break
+        if not param and elem_type:
+            for p in elem_type.Parameters:
                 if p.Definition.Name.lower() == target_clean:
-                    param_to_eval = p; break
-            if not param_to_eval and elem_type:
+                    param = p; break
+        
+        if not param:
+            target_words = target_clean.split()
+            best_match, highest_score = None, 0
+            def score_param(p):
+                return sum(1 for word in target_words if word in p.Definition.Name.lower())
+
+            for p in elem.Parameters:
+                score = score_param(p)
+                if score > highest_score: highest_score, best_match = score, p
+            if elem_type:
                 for p in elem_type.Parameters:
-                    if p.Definition.Name.lower() == target_clean:
-                        param_to_eval = p; break
-            
-            if not param_to_eval:
-                target_words = target_clean.split()
-                best_match, highest_score = None, 0
-                def score_param(p):
-                    return sum(1 for word in target_words if word in p.Definition.Name.lower())
-                for p in elem.Parameters:
                     score = score_param(p)
                     if score > highest_score: highest_score, best_match = score, p
-                if elem_type:
-                    for p in elem_type.Parameters:
-                        score = score_param(p)
-                        if score > highest_score: highest_score, best_match = score, p
-                if best_match and highest_score > 0: param_to_eval = best_match
-            
-            if not param_to_eval:
-                if "area" in target_clean: param_to_eval = elem.get_Parameter(DB.BuiltInParameter.HOST_AREA_COMPUTED) or elem.get_Parameter(DB.BuiltInParameter.ROOM_AREA)
-                elif "volume" in target_clean: param_to_eval = elem.get_Parameter(DB.BuiltInParameter.HOST_VOLUME_COMPUTED)
-                elif any(x in target_clean for x in ["width", "thickness"]): param_to_eval = elem.get_Parameter(DB.BuiltInParameter.WALL_ATTR_WIDTH_PARAM) or elem.get_Parameter(DB.BuiltInParameter.DOOR_WIDTH) or elem.get_Parameter(DB.BuiltInParameter.WINDOW_WIDTH)
-                elif "height" in target_clean: param_to_eval = elem.get_Parameter(DB.BuiltInParameter.DOOR_HEIGHT) or elem.get_Parameter(DB.BuiltInParameter.WINDOW_HEIGHT) or elem.get_Parameter(DB.BuiltInParameter.WALL_USER_HEIGHT_PARAM)
+            if best_match and highest_score > 0: param = best_match
 
-            if param_to_eval and param_to_eval.HasValue:
-                diagnosed_param_name = param_to_eval.Definition.Name
-                val = None
+        if not param:
+            if "fire rating" in target_clean:
+                param = elem.get_Parameter(DB.BuiltInParameter.FIRE_RATING) or (elem_type.get_Parameter(DB.BuiltInParameter.FIRE_RATING) if elem_type else None)
+            elif "comments" in target_clean:
+                param = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+            elif "area" in target_clean: 
+                param = elem.get_Parameter(DB.BuiltInParameter.HOST_AREA_COMPUTED) or elem.get_Parameter(DB.BuiltInParameter.ROOM_AREA)
+            elif any(x in target_clean for x in ["width", "thickness"]): 
+                param = elem.get_Parameter(DB.BuiltInParameter.WALL_ATTR_WIDTH_PARAM) or elem.get_Parameter(DB.BuiltInParameter.DOOR_WIDTH) or elem.get_Parameter(DB.BuiltInParameter.WINDOW_WIDTH)
+            elif "height" in target_clean: 
+                param = elem.get_Parameter(DB.BuiltInParameter.DOOR_HEIGHT) or elem.get_Parameter(DB.BuiltInParameter.WINDOW_HEIGHT) or elem.get_Parameter(DB.BuiltInParameter.WALL_USER_HEIGHT_PARAM)
+
+        is_failed = False
+        current_val_display = "N/A"
+
+        if param: diagnosed_param_name = param.Definition.Name
+
+        # AUDIT LOGIC: Missing Data
+        if audit_type == "missing_data":
+            if not param:
+                is_failed = True
+                current_val_display = "Parameter Not Found"
+            elif not param.HasValue:
+                is_failed = True
+                current_val_display = "<Null/Empty>"
+            elif param.StorageType == DB.StorageType.String and str(param.AsString()).strip() == "":
+                is_failed = True
+                current_val_display = "<Blank String>"
                 
-                if param_to_eval.StorageType == DB.StorageType.Double:
-                    raw_double = param_to_eval.AsDouble()
-                    dim_keywords = ["width", "thickness", "height", "length", "offset", "elevation"]
-                    
-                    if "area" in target_clean: 
-                        val = raw_double * 0.092903 # Sq Ft to Sq M
-                    elif "volume" in target_clean: 
-                        val = raw_double * 0.0283168 # Cu Ft to Cu M
-                    elif any(k in target_clean for k in dim_keywords): 
-                        # --- DYNAMIC UNIT CONVERSION FOR COMPARISON ---
-                        if target_unit in ["mm", "millimeter", "millimeters"]: val = raw_double * 304.8
-                        elif target_unit in ["cm", "centimeter", "centimeters"]: val = raw_double * 30.48
-                        elif target_unit in ["m", "meter", "meters"]: val = raw_double * 0.3048
-                        elif target_unit in ["in", "\"", "inch", "inches"]: val = raw_double * 12.0
-                        elif target_unit in ["ft", "'", "foot", "feet"]: val = raw_double * 1.0
-                        else: val = raw_double * 304.8 # Fallback metric
-                    else: 
-                        val = raw_double
-                        
-                elif param_to_eval.StorageType == DB.StorageType.Integer: val = param_to_eval.AsInteger()
-                elif param_to_eval.StorageType == DB.StorageType.String: val = param_to_eval.AsString()
+        # AUDIT LOGIC: Thresholds & Math Engine
+        elif audit_type == "threshold" and param and param.HasValue:
+            val = None
+            if param.StorageType == DB.StorageType.Double:
+                raw_double = param.AsDouble()
+                dim_keywords = ["width", "thickness", "height", "length", "offset", "elevation"]
+                
+                if "area" in target_clean: val = raw_double * 0.092903
+                elif "volume" in target_clean: val = raw_double * 0.0283168
+                elif any(k in target_clean for k in dim_keywords): 
+                    if target_unit in ["mm", "millimeter", "millimeters"]: val = raw_double * 304.8
+                    elif target_unit in ["cm", "centimeter", "centimeters"]: val = raw_double * 30.48
+                    elif target_unit in ["m", "meter", "meters"]: val = raw_double * 0.3048
+                    elif target_unit in ["in", "\"", "inch", "inches"]: val = raw_double * 12.0
+                    elif target_unit in ["ft", "'", "foot", "feet"]: val = raw_double * 1.0
+                    else: val = raw_double * 304.8
+                else: val = raw_double
+            elif param.StorageType == DB.StorageType.Integer: val = param.AsInteger()
 
-                if val is not None:
-                    if op == ">" and isinstance(val, (int, float)) and val > target_val: pass
-                    elif op == "<" and isinstance(val, (int, float)) and val < target_val: pass
-                    elif op == "==" and isinstance(val, (int, float)) and abs(val - target_val) < 0.01: pass
-                    elif op == "==" and isinstance(val, str) and str(target_val).lower() in val.lower(): pass
-                    else: continue
-                    
-                    if isinstance(val, (int, float)):
-                        total_val_sum += float(val)
-                        param_val_display = "{:.2f} {}".format(val, target_unit if any(k in target_clean for k in dim_keywords) else "")
-                    else: param_val_display = str(val)
-            else: continue
+            if val is not None:
+                current_val_display = "{:.2f} {}".format(val, target_unit if any(k in target_clean for k in dim_keywords) else "")
+                if op == ">" and not (val > target_val): is_failed = True
+                elif op == "<" and not (val < target_val): is_failed = True
+                elif op == "==" and not (abs(val - target_val) < 0.01): is_failed = True
+            else:
+                is_failed = True
+                current_val_display = "Not a Number"
+        elif audit_type == "threshold" and (not param or not param.HasValue):
+            is_failed = True
+            current_val_display = "<Missing Data>"
 
-        matched_elements.append({
-            "id": elem.Id, "name": elem_name, "level": elem_level_name, 
-            "phase": elem_phase_name, "workset": elem_ws_name, "design_option": elem_do_name,
-            "param_val": param_val_display
-        })
+        if is_failed:
+            failed_elements.append({"id": elem.Id, "name": elem_name, "error": current_val_display})
 
-    # --- Phase 3: The Diagnostic Error Report ---
-    if not matched_elements:
-        diag_msg = "No elements matched your criteria.\n\n"
-        if param_str:
-            sample_elem = DB.FilteredElementCollector(doc).OfCategory(selected_cat).WhereElementIsNotElementType().FirstElement()
-            if sample_elem:
-                available_params = [p.Definition.Name for p in sample_elem.Parameters if p.StorageType != DB.StorageType.ElementId]
-                if available_params:
-                    diag_msg += "💡 DIAGNOSTIC REPORT:\nCould not evaluate '{}'. Available parameters for '{}' include:\n- {}".format(
-                        param_str, cat_str, "\n- ".join(sorted(set(available_params))[:15])
-                    )
-        UI.TaskDialog.Show("Audit Complete", diag_msg)
+    # Diagnostic Check if completely failed
+    if not failed_elements and not any(elem for elem in collector):
+        UI.TaskDialog.Show("Audit Complete", "No elements matched your keyword criteria to audit.")
         return
 
-    # 5. Output Generation & Visual Override
+    # 5. Output Generation
     out = output.get_output()
     out.close()
 
-    matching_ids = [e["id"] for e in matched_elements]
-    ogs = DB.OverrideGraphicSettings()
-    ogs.SetProjectionLineColor(DB.Color(212, 175, 55)) 
-    
-    with DB.Transaction(doc, "AI Model Search") as t:
-        t.Start()
-        for eid in matching_ids: active_view.SetElementOverrides(eid, ogs)
-        t.Commit()
-    
-    id_collection = List[DB.ElementId](matching_ids)
-    uidoc.Selection.SetElementIds(id_collection)
-    uidoc.RefreshActiveView()
-
-    out.print_md("# 🤖 Smart BIM AI Report")
-    out.print_md("**Query:** *\"{}\"*".format(user_prompt))
-    out.print_md("---")
-    
-    out.print_md("### 📊 Metrics Summary")
-    out.print_md("* **Matches Found:** `{}`".format(len(matched_elements)))
-    if phase_str: out.print_md("* **Phase Filter:** `{}`".format(phase_str))
-    if workset_str: out.print_md("* **Workset Filter:** `{}`".format(workset_str))
-    if do_str: out.print_md("* **Design Option Filter:** `{}`".format(do_str))
-    if param_str and total_val_sum > 0: out.print_md("* **Sum ({}):** `{:.2f} {}`".format(diagnosed_param_name, total_val_sum, target_unit))
-
-    out.print_md("---")
-    table_data = []
-    for item in matched_elements:
-        table_data.append([
-            out.linkify(item["id"]), item["name"], item["level"], 
-            item["phase"], item["workset"], item["design_option"], item["param_val"]
-        ])
-
-    out.print_table(
-        table_data=table_data,
-        columns=["ID", "Type/Name", "Level", "Phase", "Workset", "Design Option", diagnosed_param_name if param_str else "Value"]
-    )
-
-    try:
-        temp_dir = tempfile.gettempdir()
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_filename = "BIM_AI_Report_" + timestamp + ".csv"
-        csv_path = os.path.join(temp_dir, csv_filename)
-
-        with open(csv_path, 'w') as csvfile:
-            writer = csv.writer(csvfile, lineterminator='\n')
-            writer.writerow(["Element ID", "Type / Name", "Level", "Phase", "Workset", "Design Option", diagnosed_param_name if param_str else "Value"])
-            for item in matched_elements:
-                writer.writerow([
-                    safe_str(item["id"]), safe_str(item["name"]), safe_str(item["level"]), 
-                    safe_str(item["phase"]), safe_str(item["workset"]), safe_str(item["design_option"]), safe_str(item["param_val"])
-                ])
+    if failed_elements:
+        matching_ids = [e["id"] for e in failed_elements]
         
+        # Graphic Override: RED for Errors
+        ogs = DB.OverrideGraphicSettings()
+        ogs.SetProjectionLineColor(DB.Color(255, 0, 0)) # Solid Red
+        ogs.SetSurfaceForegroundPatternColor(DB.Color(255, 0, 0))
+        
+        with DB.Transaction(doc, "AI QA Overrides") as t:
+            t.Start()
+            for eid in matching_ids: active_view.SetElementOverrides(eid, ogs)
+            t.Commit()
+        
+        id_collection = List[DB.ElementId](matching_ids)
+        uidoc.Selection.SetElementIds(id_collection)
+        uidoc.RefreshActiveView()
+
+        out.print_md("# 🚨 AI QA/QC Error Report")
+        out.print_md("**Audit Rule:** *\"{}\"*".format(user_prompt))
         out.print_md("---")
-        out.print_md("### 💾 Export Data")
-        out.print_md("A CSV file was generated in your temporary folder to avoid cluttering your Desktop.")
-        out.print_md("**Copy & paste this path into Excel or File Explorer:**")
-        out.print_html("<div style='background:#f4f4f4; border:1px solid #ddd; padding:8px; border-radius:4px; font-family:monospace;'>{}</div>".format(csv_path))
-        
-    except Exception as e:
-        out.print_md("⚠️ **Error saving CSV:** " + str(e))
+        out.print_md("### ⚠️ Violations Found: `{}`".format(len(failed_elements)))
+        out.print_md("The elements listed below failed the audit and have been highlighted in **RED** in your active view.")
+
+        table_data = []
+        for item in failed_elements:
+            table_data.append([out.linkify(item["id"]), item["name"], diagnosed_param_name, item["error"]])
+
+        out.print_table(
+            table_data=table_data,
+            columns=["Element ID", "Type/Name", "Audited Parameter", "Current Value (Error)"]
+        )
+
+        try:
+            temp_dir = tempfile.gettempdir()
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            csv_filename = "BIM_QA_Audit_" + timestamp + ".csv"
+            csv_path = os.path.join(temp_dir, csv_filename)
+
+            with open(csv_path, 'w') as csvfile:
+                writer = csv.writer(csvfile, lineterminator='\n')
+                writer.writerow(["Element ID", "Type / Name", "Audited Parameter", "Error Value"])
+                for item in failed_elements:
+                    writer.writerow([safe_str(item["id"]), safe_str(item["name"]), safe_str(diagnosed_param_name), safe_str(item["error"])])
+            
+            out.print_md("---")
+            out.print_md("### 💾 Export Audit Log")
+            out.print_md("Copy & paste this path into Excel to save the error report:")
+            out.print_html("<div style='background:#ffe6e6; border:1px solid #ff9999; padding:8px; border-radius:4px; font-family:monospace; color:#cc0000;'>{}</div>".format(csv_path))
+            
+        except Exception as e: pass
+    else:
+        UI.TaskDialog.Show("Audit Passed", "✅ Perfect! No elements violated your QA rule.")
 
 try: run_script()
 except Exception as ex: UI.TaskDialog.Show("Error", str(ex))
