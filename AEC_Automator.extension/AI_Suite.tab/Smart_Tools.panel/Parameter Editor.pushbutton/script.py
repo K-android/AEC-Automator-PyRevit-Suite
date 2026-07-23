@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 import clr
 import re
+import os
+import json
+
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
 clr.AddReference('System')
@@ -8,6 +11,9 @@ clr.AddReference('System')
 import Autodesk.Revit.DB as DB
 import Autodesk.Revit.UI as UI
 from System.Collections.Generic import List
+from System.Net import ServicePointManager, SecurityProtocolType, WebClient, HttpRequestHeader
+from System.Text import Encoding
+from pyrevit import revit, output, forms
 
 def normalize_text(text):
     if not text: return ""
@@ -26,50 +32,48 @@ def matches_level(req_level, elem_level_name):
     return False
 
 def run_script():
-    from pyrevit import revit, output, forms
     doc = revit.doc
     uidoc = revit.uidoc
 
     # 1. Prompt User
     instructions = (
-        "✏️ BIM AI Parameter Editor\n\n"
+        "✏️ BIM AI Parameter Editor (Targeted & Unit-Aware)\n\n"
         "How to use:\n"
-        "• State elements and target parameter (e.g., 'Set Fire Rating of Level 1 doors to 2-HR').\n"
-        "• To wipe data, say 'Clear' or 'Remove' (e.g., 'Clear comments on all walls').\n"
-        "• For checkboxes, use Yes/No or True/False.\n\n"
+        "• State elements, names, and parameter (e.g., 'Change the base offset of the Tree Guard railing at Level 5 to 900mm').\n"
+        "• You can use units like mm, cm, m, ft, or in.\n\n"
         "Tell the AI what to update:"
     )
     user_prompt = forms.ask_for_string(
         prompt=instructions,
         title="BIM AI Parameter Editor",
-        default="Set Fire Rating of all doors to 2-HR"
+        default="Set all Door Fire Rating to 2-Hr"
     )
     if not user_prompt: return
 
-    # 2. Configure .NET Networking
-    import json
-    from System.Net import ServicePointManager, SecurityProtocolType, WebClient, HttpRequestHeader
-    from System.Text import Encoding
+    # 2. Configure Networking & API Key
     ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
-
-    # ==========================================================================
-    # PASTE YOUR GEMINI API KEY HERE
-    # ==========================================================================
-    GEMINI_API_KEY = "PUT GEMINI KEY"
+    
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
+    if not GEMINI_API_KEY:
+        GEMINI_API_KEY = "YOUR_SECURE_API_KEY_HERE" # Fallback
+        
+    if GEMINI_API_KEY == "YOUR_SECURE_API_KEY_HERE" or not GEMINI_API_KEY:
+        UI.TaskDialog.Show("Security Warning", "API Key missing.")
+        return
 
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY
     
+    # UPGRADED SYSTEM INSTRUCTIONS: Force strict keywords and unit extraction
     system_instruction_text = (
         "You are a Revit API Data Editor. Convert natural language into a JSON edit object.\n"
         "Output ONLY raw JSON matching this key structure exactly:\n"
-        '{"category": string, "keywords": list of strings, "level": string or null, "phase": string or null, "workset": string or null, "design_option": string or null, "target_parameter": string, "new_value": string or number}\n\n'
+        '{"category": string, "keywords": list of strings, "level": string or null, "target_parameter": string, "new_value": string or number, "unit": string or null}\n\n'
         "Domain Rules:\n"
-        "1. CATEGORY: Rooms, Walls, Doors, Windows, Columns, Floors, Ceilings, Roofs, Furniture, Plumbing, Lighting, Mechanical Equipment, Casework, etc.\n"
-        "2. KEYWORDS: Words to locate the elements. DO NOT include the parameter name or new value here.\n"
-        "3. TARGET_PARAMETER: The exact name of the Revit parameter to change (e.g. 'Fire Rating', 'Comments', 'Is Exterior').\n"
-        "4. NEW_VALUE: The exact value to write. \n"
-        "   - If the user asks to CLEAR, REMOVE, or WIPE a value, output an empty string \"\".\n"
-        "   - If the parameter is a Yes/No checkbox, output 1 for Yes/Check/True and 0 for No/Uncheck/False."
+        "1. CATEGORY: Rooms, Walls, Doors, Windows, Columns, Floors, Ceilings, Roofs, Furniture, Casework, Railings, Stairs, Ramps, Specialty Equipment, Generic Models, Site, Planting, Curtain Panels, Curtain Mullions, Structural Columns, Structural Framing, Structural Foundations, Plumbing, Lighting, Mechanical Equipment, Electrical Equipment, Electrical Fixtures, Ducts, Pipes.\n"
+        "2. KEYWORDS: CRITICAL - Extract identifying names, family types, or descriptors (e.g., 'Tree Guard', 'Exterior'). DO NOT leave blank if the user names a specific object type.\n"
+        "3. TARGET_PARAMETER: The exact name of the Revit parameter to change.\n"
+        "4. NEW_VALUE: The exact value to write. ONLY output the numeric value for dimensions.\n"
+        "5. UNIT: If the user provides a unit (e.g., 'mm', 'cm', 'm', 'ft', 'in', '\"', '\''), extract it here. If no unit is specified but it is a dimension, assume 'mm'."
     )
 
     payload = {
@@ -82,9 +86,15 @@ def run_script():
     client = WebClient()
     client.Headers[HttpRequestHeader.ContentType] = "application/json"
     raw_bytes = Encoding.UTF8.GetBytes(json.dumps(payload))
-    res_json = json.loads(Encoding.UTF8.GetString(client.UploadData(url, "POST", raw_bytes)))
-    clean_json_str = res_json['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
-    parsed_data = json.loads(clean_json_str)
+    
+    try:
+        response_bytes = client.UploadData(url, "POST", raw_bytes)
+        res_json = json.loads(Encoding.UTF8.GetString(response_bytes))
+        clean_json_str = res_json['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
+        parsed_data = json.loads(clean_json_str)
+    except Exception as e:
+        UI.TaskDialog.Show("API Connection Error", "Failed to connect to the Gemini API.\n\nDetails: " + str(e))
+        return
 
     # Extract Action Data
     cat_str = parsed_data.get("category", "Doors")
@@ -92,25 +102,45 @@ def run_script():
     level_str = parsed_data.get("level")
     target_param_name = parsed_data.get("target_parameter")
     new_value = parsed_data.get("new_value")
+    unit_str = parsed_data.get("unit") # The new unit variable
 
     if not target_param_name or new_value is None:
-        UI.TaskDialog.Show("AI Error", "The AI could not determine which parameter to change, or what the new value should be. Try rephrasing.")
+        UI.TaskDialog.Show("AI Error", "The AI could not determine which parameter to change.")
         return
 
     # 4. Search Revit Document
     cat_map = {
-        "Rooms": DB.BuiltInCategory.OST_Rooms, "Walls": DB.BuiltInCategory.OST_Walls,
-        "Doors": DB.BuiltInCategory.OST_Doors, "Windows": DB.BuiltInCategory.OST_Windows,
-        "Columns": DB.BuiltInCategory.OST_Columns, "Floors": DB.BuiltInCategory.OST_Floors,
-        "Ceilings": DB.BuiltInCategory.OST_Ceilings, "Roofs": DB.BuiltInCategory.OST_Roofs,
-        "Furniture": DB.BuiltInCategory.OST_Furniture, "Plumbing": DB.BuiltInCategory.OST_PlumbingFixtures,
-        "Lighting": DB.BuiltInCategory.OST_LightingFixtures, "Mechanical Equipment": DB.BuiltInCategory.OST_MechanicalEquipment,
-        "Casework": DB.BuiltInCategory.OST_Casework, "Specialty Equipment": DB.BuiltInCategory.OST_SpecialityEquipment
+        "Rooms": DB.BuiltInCategory.OST_Rooms, "Room": DB.BuiltInCategory.OST_Rooms,
+        "Walls": DB.BuiltInCategory.OST_Walls, "Wall": DB.BuiltInCategory.OST_Walls,
+        "Doors": DB.BuiltInCategory.OST_Doors, "Door": DB.BuiltInCategory.OST_Doors,
+        "Windows": DB.BuiltInCategory.OST_Windows, "Window": DB.BuiltInCategory.OST_Windows,
+        "Columns": DB.BuiltInCategory.OST_Columns, "Column": DB.BuiltInCategory.OST_Columns,
+        "Floors": DB.BuiltInCategory.OST_Floors, "Floor": DB.BuiltInCategory.OST_Floors,
+        "Ceilings": DB.BuiltInCategory.OST_Ceilings, "Ceiling": DB.BuiltInCategory.OST_Ceilings,
+        "Roofs": DB.BuiltInCategory.OST_Roofs, "Roof": DB.BuiltInCategory.OST_Roofs,
+        "Casework": DB.BuiltInCategory.OST_Casework, "Cabinet": DB.BuiltInCategory.OST_Casework,
+        "Furniture": DB.BuiltInCategory.OST_Furniture,
+        "Railings": DB.BuiltInCategory.OST_StairsRailing, "Railing": DB.BuiltInCategory.OST_StairsRailing,
+        "Stairs": DB.BuiltInCategory.OST_Stairs, "Stair": DB.BuiltInCategory.OST_Stairs,
+        "Ramps": DB.BuiltInCategory.OST_Ramps, "Ramp": DB.BuiltInCategory.OST_Ramps,
+        "Specialty Equipment": DB.BuiltInCategory.OST_SpecialityEquipment,
+        "Generic Models": DB.BuiltInCategory.OST_GenericModel, "Generic Model": DB.BuiltInCategory.OST_GenericModel,
+        "Site": DB.BuiltInCategory.OST_Site, "Planting": DB.BuiltInCategory.OST_Planting, 
+        "Curtain Panels": DB.BuiltInCategory.OST_CurtainWallPanels, "Curtain Mullions": DB.BuiltInCategory.OST_CurtainWallMullions,
+        "Structural Columns": DB.BuiltInCategory.OST_StructuralColumns, "Structural Framing": DB.BuiltInCategory.OST_StructuralFraming, 
+        "Structural Foundations": DB.BuiltInCategory.OST_StructuralFoundation,
+        "Plumbing": DB.BuiltInCategory.OST_PlumbingFixtures, "Lighting": DB.BuiltInCategory.OST_LightingFixtures,
+        "Mechanical Equipment": DB.BuiltInCategory.OST_MechanicalEquipment, "Electrical Equipment": DB.BuiltInCategory.OST_ElectricalEquipment,
+        "Electrical Fixtures": DB.BuiltInCategory.OST_ElectricalFixtures, "Ducts": DB.BuiltInCategory.OST_DuctCurves, 
+        "Pipes": DB.BuiltInCategory.OST_PipeCurves, "Spaces": DB.BuiltInCategory.OST_MEPSpaces, "Areas": DB.BuiltInCategory.OST_Areas
     }
 
-    selected_cat = cat_map.get(cat_str, DB.BuiltInCategory.OST_Doors)
-    collector = DB.FilteredElementCollector(doc).OfCategory(selected_cat).WhereElementIsNotElementType()
+    selected_cat = cat_map.get(cat_str)
+    if not selected_cat:
+        UI.TaskDialog.Show("Mapping Error", "The category '{}' is not supported.".format(cat_str))
+        return
 
+    collector = DB.FilteredElementCollector(doc).OfCategory(selected_cat).WhereElementIsNotElementType()
     matched_elements = []
     processed_type_ids = set()
 
@@ -119,19 +149,25 @@ def run_script():
         try: elem_type = doc.GetElement(elem.GetTypeId())
         except: pass
 
-        # Level Filter
+        # Level Scanner
         elem_level_name = "N/A"
         try:
-            if hasattr(elem, "Level") and elem.Level: elem_level_name = elem.Level.Name
+            if hasattr(elem, "Level") and elem.Level: 
+                elem_level_name = elem.Level.Name
             else:
-                lvl_param = elem.get_Parameter(DB.BuiltInParameter.INSTANCE_REFERENCE_LEVEL_PARAM) or elem.get_Parameter(DB.BuiltInParameter.ROOM_LEVEL_ID)
-                if lvl_param:
+                lvl_param = elem.get_Parameter(DB.BuiltInParameter.INSTANCE_REFERENCE_LEVEL_PARAM)
+                if not lvl_param:
+                    for p in elem.Parameters:
+                        if "level" in p.Definition.Name.lower() and p.StorageType == DB.StorageType.ElementId:
+                            lvl_param = p; break
+                if lvl_param and lvl_param.HasValue:
                     lvl_elem = doc.GetElement(lvl_param.AsElementId())
                     if lvl_elem: elem_level_name = lvl_elem.Name
         except: pass
+        
         if level_str and not matches_level(level_str, elem_level_name): continue
 
-        # Smart Keyword Filtering
+        # --- STRICTER KEYWORD FILTERING ---
         elem_name, family_name = "Unknown", ""
         try:
             if elem_type:
@@ -141,11 +177,15 @@ def run_script():
         except: pass
 
         if keywords:
-            param_words = normalize_text(target_param_name).split()
-            val_words = normalize_text(str(new_value)).split()
-            stop_words = set(["find", "all", "show", "me", "get", "the", "set", "change", "update", "clear", "remove", "door", "doors", "wall", "walls", "to", "with", "value"] + param_words + val_words)
+            target_clean = target_param_name.lower().strip()
+            stop_words = set(["find", "all", "show", "me", "get", "the", "set", "change", "update", "clear", "remove", "door", "doors", "wall", "walls", "railing", "railings", "to", "with", "value"] + target_clean.split())
             
-            filtered_words = [normalize_text(w) for w in keywords if normalize_text(w) not in stop_words and len(w) > 1]
+            # Break down multi-word keywords (like "Tree Guard") into strict individual words to force a perfect match
+            filtered_words = []
+            for kw in keywords:
+                for w in normalize_text(kw).split():
+                    if w not in stop_words and len(w) > 1:
+                        filtered_words.append(w)
             
             target_str = normalize_text(family_name) + " " + normalize_text(elem_name)
             try:
@@ -156,78 +196,111 @@ def run_script():
                         if p.StorageType == DB.StorageType.String and p.HasValue: target_str += " " + normalize_text(p.AsString())
             except: pass
 
-            if filtered_words and not all(word in target_str for word in filtered_words): continue
+            # If filtered words exist, they MUST ALL be present in the element's metadata to prevent picking up random railings
+            if filtered_words and not all(word in target_str for word in filtered_words): 
+                continue
+
+        # --- THE SELF-DIAGNOSING PARAMETER ENGINE ---
+        param_to_edit = None
+        target_clean = target_param_name.lower().strip()
         
-        # Robust Parameter Lookup
-        param_to_edit = elem.LookupParameter(target_param_name)
+        for p in elem.Parameters:
+            if p.Definition.Name.lower() == target_clean:
+                param_to_edit = p; break
         if not param_to_edit and elem_type:
-            param_to_edit = elem_type.LookupParameter(target_param_name)
-            
+            for p in elem_type.Parameters:
+                if p.Definition.Name.lower() == target_clean:
+                    param_to_edit = p; break
+        
         if not param_to_edit:
-            if "fire rating" in target_param_name.lower():
-                param_to_edit = elem.get_Parameter(DB.BuiltInParameter.FIRE_RATING)
-                if not param_to_edit and elem_type: param_to_edit = elem_type.get_Parameter(DB.BuiltInParameter.FIRE_RATING)
-            elif "comments" in target_param_name.lower():
-                param_to_edit = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
-            elif "mark" in target_param_name.lower():
-                param_to_edit = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_MARK)
-            
+            target_words = target_clean.split()
+            best_match, highest_score = None, 0
+            def score_param(p):
+                return sum(1 for word in target_words if word in p.Definition.Name.lower())
+
+            for p in elem.Parameters:
+                if not p.IsReadOnly:
+                    score = score_param(p)
+                    if score > highest_score: highest_score, best_match = score, p
+            if elem_type:
+                for p in elem_type.Parameters:
+                    if not p.IsReadOnly:
+                        score = score_param(p)
+                        if score > highest_score: highest_score, best_match = score, p
+            if best_match and highest_score > 0: param_to_edit = best_match
+
         if param_to_edit and not param_to_edit.IsReadOnly:
+            target_param_name = param_to_edit.Definition.Name 
             if elem_type and param_to_edit.Element.Id == elem_type.Id:
                 type_id_key = str(elem_type.Id)
-                if type_id_key in processed_type_ids:
-                    continue
+                if type_id_key in processed_type_ids: continue
                 processed_type_ids.add(type_id_key)
                 
-            matched_elements.append({
-                "element": param_to_edit.Element,
-                "param": param_to_edit
-            })
+            matched_elements.append({"element": param_to_edit.Element, "param": param_to_edit})
 
     if not matched_elements:
-        UI.TaskDialog.Show("Search Complete", "No editable elements matched your criteria, or the parameter '{}' is Read-Only/Missing.".format(target_param_name))
+        diag_msg = "No editable elements matched your specific criteria.\n\n"
+        sample_elem = DB.FilteredElementCollector(doc).OfCategory(selected_cat).WhereElementIsNotElementType().FirstElement()
+        if sample_elem:
+            available_params = [p.Definition.Name for p in sample_elem.Parameters if not p.IsReadOnly and p.StorageType != DB.StorageType.ElementId]
+            if available_params:
+                diag_msg += "💡 DIAGNOSTIC REPORT:\nAvailable parameters for '{}' include:\n- {}".format(cat_str, "\n- ".join(sorted(available_params)[:15]))
+        UI.TaskDialog.Show("Audit Failed", diag_msg)
         return
 
-    # 5. The Safety Checkpoint
+    # Dimensional Check
+    dim_keywords = ["offset", "height", "width", "length", "thickness", "elevation", "radius"]
+    is_dimensional = any(word in target_param_name.lower() for word in dim_keywords)
+
+    # 5. Execute Transaction
     dialog = UI.TaskDialog("AI Safety Checkpoint")
-    dialog.MainInstruction = "AI is ready to update the Revit model."
-    display_val = "CLEAR/EMPTY" if new_value == "" else new_value
-    dialog.MainContent = "Target Category: {}\nUnique Elements/Types to Update: {}\n\nParameter: '{}'\nNew Value: '{}'\n\nDo you want to proceed?".format(cat_str, len(matched_elements), target_param_name, display_val)
+    
+    # UI Updated to show dynamic conversion
+    metric_warning = ""
+    target_unit = unit_str.lower() if unit_str else "mm"
+    
+    if is_dimensional:
+        metric_warning = "\n\n⚠️ UNIT CONVERSION ACTIVE:\nThe value ({}{}) will be dynamically converted to Revit's Decimal Feet format.".format(new_value, target_unit)
+        
+    dialog.MainContent = "Target Category: {}\nElements to Update: {}\nDiagnosed Parameter: '{}'\nValue to Apply: '{}'{}\n\nProceed?".format(cat_str, len(matched_elements), target_param_name, new_value, metric_warning)
     dialog.CommonButtons = UI.TaskDialogCommonButtons.Yes | UI.TaskDialogCommonButtons.No
     
     if dialog.Show() == UI.TaskDialogResult.Yes:
-        # 6. Execute the Transaction (With Checkbox & Clear Handlers)
         success_count = 0
         with DB.Transaction(doc, "AI Parameter Update") as t:
             t.Start()
             for item in matched_elements:
                 param = item["param"]
                 try:
-                    # Clear Protocol
-                    if new_value == "" or str(new_value).lower() in ["clear", "none", "null"]:
-                        if param.StorageType == DB.StorageType.String:
-                            param.Set("")
-                        elif param.StorageType == DB.StorageType.Integer:
-                            param.Set(0) # Unchecks boxes, zeroes numbers
-                        elif param.StorageType == DB.StorageType.Double:
-                            param.Set(0.0)
+                    if new_value == "" or str(new_value).lower() in ["clear", "none"]:
+                        if param.StorageType == DB.StorageType.String: param.Set("")
+                        elif param.StorageType == DB.StorageType.Integer: param.Set(0)
+                        elif param.StorageType == DB.StorageType.Double: param.Set(0.0)
                         success_count += 1
-                    
-                    # Standard Write Protocol
                     else:
                         if param.StorageType == DB.StorageType.String:
                             param.Set(str(new_value))
                         elif param.StorageType == DB.StorageType.Double:
-                            param.Set(float(new_value))
-                        elif param.StorageType == DB.StorageType.Integer:
-                            # Yes/No Checkbox Safety Net
-                            val_str = str(new_value).lower().strip()
-                            if val_str in ["true", "yes", "checked", "on"]:
-                                param.Set(1)
-                            elif val_str in ["false", "no", "unchecked", "off"]:
-                                param.Set(0)
+                            val_float = float(new_value)
+                            
+                            # --- DYNAMIC UNIT MATH ENGINE ---
+                            if is_dimensional:
+                                if target_unit in ["mm", "millimeter", "millimeters"]: conversion = 304.8
+                                elif target_unit in ["cm", "centimeter", "centimeters"]: conversion = 30.48
+                                elif target_unit in ["m", "meter", "meters"]: conversion = 0.3048
+                                elif target_unit in ["in", "\"", "inch", "inches"]: conversion = 12.0
+                                elif target_unit in ["ft", "'", "foot", "feet"]: conversion = 1.0
+                                else: conversion = 304.8 # Fallback to mm
+                                
+                                param.Set(val_float / conversion)
                             else:
-                                param.Set(int(float(new_value)))
+                                param.Set(val_float)
+                                
+                        elif param.StorageType == DB.StorageType.Integer:
+                            val_str = str(new_value).lower().strip()
+                            if val_str in ["true", "yes", "on"]: param.Set(1)
+                            elif val_str in ["false", "no", "off"]: param.Set(0)
+                            else: param.Set(int(float(new_value)))
                         success_count += 1
                 except Exception:
                     pass
@@ -236,4 +309,4 @@ def run_script():
         UI.TaskDialog.Show("Update Complete", "Successfully updated {} parameter(s)!".format(success_count))
 
 try: run_script()
-except Exception as ex: UI.TaskDialog.Show("Error", str(ex))
+except Exception as ex: UI.TaskDialog.Show("Fatal Error", str(ex))
