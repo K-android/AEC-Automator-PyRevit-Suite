@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 import clr
 import re
+import os
+import json
+
 clr.AddReference('RevitAPI')
 clr.AddReference('RevitAPIUI')
 clr.AddReference('System')
@@ -8,6 +11,8 @@ clr.AddReference('System')
 import Autodesk.Revit.DB as DB
 import Autodesk.Revit.UI as UI
 from System.Collections.Generic import List
+from System.Net import ServicePointManager, SecurityProtocolType, WebClient, HttpRequestHeader
+from System.Text import Encoding
 
 def normalize_text(text):
     if not text: return ""
@@ -35,8 +40,8 @@ def run_script():
     instructions = (
         "👁️ BIM AI View Manipulator\n\n"
         "How to use (Must be in a 3D View):\n"
-        "• To crop: 'Cut a section box around Level 1 doors'.\n"
-        "• To hide others: 'Isolate structural columns'.\n"
+        "• To crop: 'Cut a section box around the Tree Guard railing'.\n"
+        "• To hide others: 'Isolate exterior structural columns at Level 1'.\n"
         "• Type 'reset' to clear view settings and unhide.\n\n"
         "Tell the AI what to view:"
     )
@@ -59,16 +64,15 @@ def run_script():
         uidoc.RefreshActiveView()
         return
 
-    # 2. Configure .NET Networking
-    import json
-    from System.Net import ServicePointManager, SecurityProtocolType, WebClient, HttpRequestHeader
-    from System.Text import Encoding
+    # 2. Configure .NET Networking & Secure API Key
     ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
-
-    # ==========================================================================
-    # PASTE YOUR GEMINI API KEY HERE
-    # ==========================================================================
-    GEMINI_API_KEY = "PUT GEMINI KEY"
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
+    if not GEMINI_API_KEY:
+        GEMINI_API_KEY = "YOUR_SECURE_API_KEY_HERE"
+        
+    if GEMINI_API_KEY == "YOUR_SECURE_API_KEY_HERE" or not GEMINI_API_KEY:
+        UI.TaskDialog.Show("Security Warning", "API Key missing.")
+        return
 
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY
     
@@ -78,8 +82,8 @@ def run_script():
         '{"action": string, "category": string, "keywords": list of strings, "level": string or null}\n\n'
         "Domain Rules:\n"
         "1. ACTION: Must be exactly 'isolate' (to hide other elements) or 'section_box' (to crop the 3D view).\n"
-        "2. CATEGORY: Rooms, Walls, Doors, Windows, Columns, Floors, Ceilings, Roofs, Furniture, Plumbing, Lighting, Mechanical Equipment, Casework, Specialty Equipment, etc.\n"
-        "3. KEYWORDS: Words to locate the elements (e.g. ['exterior', 'glass']).\n"
+        "2. CATEGORY: Rooms, Walls, Doors, Windows, Columns, Floors, Ceilings, Roofs, Furniture, Casework, Railings, Stairs, Ramps, Specialty Equipment, Generic Models, Site, Planting, Curtain Panels, Curtain Mullions, Structural Columns, Structural Framing, Structural Foundations, Plumbing, Lighting, Mechanical Equipment, Electrical Equipment, Electrical Fixtures, Ducts, Pipes.\n"
+        "3. KEYWORDS: CRITICAL - Extract identifying names, family types, or descriptors (e.g., 'Tree Guard', 'Exterior'). DO NOT leave blank if the user names a specific object type.\n"
         "4. LEVEL: Extract any level mentions."
     )
 
@@ -93,9 +97,13 @@ def run_script():
     client = WebClient()
     client.Headers[HttpRequestHeader.ContentType] = "application/json"
     raw_bytes = Encoding.UTF8.GetBytes(json.dumps(payload))
-    res_json = json.loads(Encoding.UTF8.GetString(client.UploadData(url, "POST", raw_bytes)))
-    clean_json_str = res_json['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
-    parsed_data = json.loads(clean_json_str)
+    try:
+        res_json = json.loads(Encoding.UTF8.GetString(client.UploadData(url, "POST", raw_bytes)))
+        clean_json_str = res_json['candidates'][0]['content']['parts'][0]['text'].replace("```json", "").replace("```", "").strip()
+        parsed_data = json.loads(clean_json_str)
+    except Exception as e:
+        UI.TaskDialog.Show("API Connection Error", "Failed to connect to the Gemini API.\n\nDetails: " + str(e))
+        return
 
     # Extract Action Data
     action_type = parsed_data.get("action", "isolate")
@@ -108,19 +116,38 @@ def run_script():
         UI.TaskDialog.Show("View Error", "Section boxes can only be created in a 3D View. Please open a 3D view and run the tool again.")
         return
 
-    # 4. Search Revit Document
+    # 4. Search Revit Document - THE BULLETPROOF DICTIONARY
     cat_map = {
-        "Rooms": DB.BuiltInCategory.OST_Rooms, "Walls": DB.BuiltInCategory.OST_Walls,
-        "Doors": DB.BuiltInCategory.OST_Doors, "Windows": DB.BuiltInCategory.OST_Windows,
-        "Columns": DB.BuiltInCategory.OST_Columns, "Structural Columns": DB.BuiltInCategory.OST_StructuralColumns,
-        "Floors": DB.BuiltInCategory.OST_Floors, "Ceilings": DB.BuiltInCategory.OST_Ceilings,
-        "Roofs": DB.BuiltInCategory.OST_Roofs, "Furniture": DB.BuiltInCategory.OST_Furniture,
-        "Plumbing": DB.BuiltInCategory.OST_PlumbingFixtures, "Lighting": DB.BuiltInCategory.OST_LightingFixtures, 
-        "Mechanical Equipment": DB.BuiltInCategory.OST_MechanicalEquipment, "Casework": DB.BuiltInCategory.OST_Casework, 
-        "Specialty Equipment": DB.BuiltInCategory.OST_SpecialityEquipment, "Generic Models": DB.BuiltInCategory.OST_GenericModel
+        "Rooms": DB.BuiltInCategory.OST_Rooms, "Room": DB.BuiltInCategory.OST_Rooms,
+        "Walls": DB.BuiltInCategory.OST_Walls, "Wall": DB.BuiltInCategory.OST_Walls,
+        "Doors": DB.BuiltInCategory.OST_Doors, "Door": DB.BuiltInCategory.OST_Doors,
+        "Windows": DB.BuiltInCategory.OST_Windows, "Window": DB.BuiltInCategory.OST_Windows,
+        "Columns": DB.BuiltInCategory.OST_Columns, "Column": DB.BuiltInCategory.OST_Columns,
+        "Floors": DB.BuiltInCategory.OST_Floors, "Floor": DB.BuiltInCategory.OST_Floors,
+        "Ceilings": DB.BuiltInCategory.OST_Ceilings, "Ceiling": DB.BuiltInCategory.OST_Ceilings,
+        "Roofs": DB.BuiltInCategory.OST_Roofs, "Roof": DB.BuiltInCategory.OST_Roofs,
+        "Casework": DB.BuiltInCategory.OST_Casework, "Cabinet": DB.BuiltInCategory.OST_Casework,
+        "Furniture": DB.BuiltInCategory.OST_Furniture,
+        "Railings": DB.BuiltInCategory.OST_StairsRailing, "Railing": DB.BuiltInCategory.OST_StairsRailing,
+        "Stairs": DB.BuiltInCategory.OST_Stairs, "Stair": DB.BuiltInCategory.OST_Stairs,
+        "Ramps": DB.BuiltInCategory.OST_Ramps, "Ramp": DB.BuiltInCategory.OST_Ramps,
+        "Specialty Equipment": DB.BuiltInCategory.OST_SpecialityEquipment,
+        "Generic Models": DB.BuiltInCategory.OST_GenericModel, "Generic Model": DB.BuiltInCategory.OST_GenericModel,
+        "Site": DB.BuiltInCategory.OST_Site, "Planting": DB.BuiltInCategory.OST_Planting, 
+        "Curtain Panels": DB.BuiltInCategory.OST_CurtainWallPanels, "Curtain Mullions": DB.BuiltInCategory.OST_CurtainWallMullions,
+        "Structural Columns": DB.BuiltInCategory.OST_StructuralColumns, "Structural Framing": DB.BuiltInCategory.OST_StructuralFraming, 
+        "Structural Foundations": DB.BuiltInCategory.OST_StructuralFoundation,
+        "Plumbing": DB.BuiltInCategory.OST_PlumbingFixtures, "Lighting": DB.BuiltInCategory.OST_LightingFixtures,
+        "Mechanical Equipment": DB.BuiltInCategory.OST_MechanicalEquipment, "Electrical Equipment": DB.BuiltInCategory.OST_ElectricalEquipment,
+        "Electrical Fixtures": DB.BuiltInCategory.OST_ElectricalFixtures, "Ducts": DB.BuiltInCategory.OST_DuctCurves, 
+        "Pipes": DB.BuiltInCategory.OST_PipeCurves, "Spaces": DB.BuiltInCategory.OST_MEPSpaces, "Areas": DB.BuiltInCategory.OST_Areas
     }
 
-    selected_cat = cat_map.get(cat_str, DB.BuiltInCategory.OST_Walls)
+    selected_cat = cat_map.get(cat_str)
+    if not selected_cat:
+        UI.TaskDialog.Show("Mapping Error", "The category '{}' is not supported in the current map.".format(cat_str))
+        return
+        
     collector = DB.FilteredElementCollector(doc, active_view.Id).OfCategory(selected_cat).WhereElementIsNotElementType()
 
     matched_elements = []
@@ -130,19 +157,24 @@ def run_script():
         try: elem_type = doc.GetElement(elem.GetTypeId())
         except: pass
 
-        # Level Filter
+        # Robust Level Scanner
         elem_level_name = "N/A"
         try:
-            if hasattr(elem, "Level") and elem.Level: elem_level_name = elem.Level.Name
+            if hasattr(elem, "Level") and elem.Level: 
+                elem_level_name = elem.Level.Name
             else:
                 lvl_param = elem.get_Parameter(DB.BuiltInParameter.INSTANCE_REFERENCE_LEVEL_PARAM) or elem.get_Parameter(DB.BuiltInParameter.ROOM_LEVEL_ID)
-                if lvl_param:
+                if not lvl_param:
+                    for p in elem.Parameters:
+                        if "level" in p.Definition.Name.lower() and p.StorageType == DB.StorageType.ElementId:
+                            lvl_param = p; break
+                if lvl_param and lvl_param.HasValue:
                     lvl_elem = doc.GetElement(lvl_param.AsElementId())
                     if lvl_elem: elem_level_name = lvl_elem.Name
         except: pass
         if level_str and not matches_level(level_str, elem_level_name): continue
 
-        # Smart Keyword Filtering
+        # Strict Keyword Filtering
         elem_name, family_name = "Unknown", ""
         try:
             if elem_type:
@@ -152,8 +184,13 @@ def run_script():
         except: pass
 
         if keywords:
-            stop_words = set(["isolate", "section", "box", "show", "only", "find", "all", "the", "around", "door", "doors", "wall", "walls"])
-            filtered_words = [normalize_text(w) for w in keywords if normalize_text(w) not in stop_words and len(w) > 1]
+            stop_words = set(["isolate", "section", "box", "show", "only", "find", "all", "the", "around", "door", "doors", "wall", "walls", "railing", "railings"])
+            filtered_words = []
+            for kw in keywords:
+                for w in normalize_text(kw).split():
+                    if w not in stop_words and len(w) > 1:
+                        filtered_words.append(w)
+                        
             target_str = normalize_text(family_name) + " " + normalize_text(elem_name)
             
             try:
@@ -193,8 +230,7 @@ def run_script():
                 if bbox:
                     valid_boxes += 1
                     min_x = min(min_x, bbox.Min.X)
-                    min_y = min(min_y, bbox.Min.X)
-                    min_y = min(min_y, bbox.Min.Y)
+                    min_y = min(min_y, bbox.Min.Y) # Fixed coordinate bug here
                     min_z = min(min_z, bbox.Min.Z)
                     max_x = max(max_x, bbox.Max.X)
                     max_y = max(max_y, bbox.Max.Y)
